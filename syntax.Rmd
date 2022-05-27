@@ -1,0 +1,112 @@
+---
+title: Scabies diagnoses analysis
+output: html_notebook
+---
+
+```{r message=TRUE, warning=TRUE}
+library("data.table")
+library("ggplot2")
+library("lubridate")
+library("kableExtra")
+library("forecast")
+
+Sys.setlocale("LC_TIME", "C")
+```
+
+# Load data
+
+```{r}
+data <- fread("../dades/scabies_diagnoses.txt", sep = ";", header = T)
+data[, date := as.Date(date)]
+data[, variable := factor(variable, levels = c("Total", "0-15 years", "16-30 years", "31-60 years", ">60 years", "Women", "Men", "Rural", "1st Q (least deprived)", "2nd Q", "3rd Q", "4th Q (most deprived)"))]
+```
+
+# Results
+
+```{r}
+# Summary of number of new scabies diagnoses and mothly incidence
+table_0 <- data[, .(
+  `Scabies diagnoses` = sum(cases),
+  `Monthly incidence mean` = mean(rate, na.rm = T)
+), .(Year = year(date), variable)]
+table_0[order(variable, Year)]
+```
+
+```{r fig.height=7, fig.width=8}
+# Figure 1
+
+dg <- data[variable %in% c("Total", "0-15 years", "16-30 years", "31-60 years", ">60 years")]
+dg[, variable_wrap := factor(ifelse(variable == "Total", "Total", "By age group"), levels = c("Total", "By age group"))]
+
+# tiff("../resultats/figure_1.jpeg", units="in", width=8, height=7, res=600)
+ggplot(dg, aes(x = date, y = rate, color = variable)) +
+  geom_line() +
+  geom_point(aes(shape = variable)) +
+  scale_x_date(breaks = "1 year", date_labels = "%Y") +
+  # scale_color_manual(values = c("Total", "0-15 years", "16-30 years", "31-60 years", ">60 years"))
+  scale_colour_grey() +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5)) +
+  labs(title = "", x = "", y = "Incidence per 100.000 population", color = "", shape = "") + facet_wrap(~ variable_wrap, ncol = 1, scales = "free")
+# dev.off()
+```
+
+```{r}
+#  Observed (Rate column) and estimated (Point Forecast, Lo 95 and Hi 95 columns) rates of monthly new scabies diagnoses
+data_split <- split(data, data$variable, drop = TRUE)
+data_predictions <- do.call("rbind", lapply(data_split, 
+                                            function(d){
+                                              dx_ts <- ts(d[order(date)][year(date) < 2019, rate], frequency = 12)
+                                              dxfit <- tslm(dx_ts ~ trend + season)
+                                              pred <- forecast(dxfit, h =  length(unique(d[year(date) >= 2019, date])), level = c(95))
+                                              dt_predict <- as.data.table(pred)
+                                              dt_predict[, date :=  seq(d[year(date) >= 2019][, min(date)] , to = d[year(date) >= 2019][, max(date)], by = "month")]
+                                              dt_predict_observed <- merge(dt_predict, d[, c("date", "rate", "cases", "population")], by = c("date"))
+                                              dt_predict_observed[, variable := unique(d$variable)]
+                                              dt_predict_observed
+                                              }
+                                            )
+                            )
+
+```
+
+```{r fig.height=6, fig.width=8}
+# Figure 2
+dg <- data_predictions[variable %in% c("Total", "1st Q (least deprived)", "2nd Q", "3rd Q", "4th Q (most deprived)", "Rural")]
+
+# tiff("../resultats/figura_2.jpeg", units="in", width=8, height=6, res=600)
+ggplot(dg, aes(x = date)) + 
+  geom_line(aes(y = rate, linetype = "Observed")) + 
+  geom_line(aes(y = `Point Forecast`, linetype = "Expected")) +
+  geom_ribbon(aes(ymin = `Lo 95`, ymax = `Hi 95`, fill = "95% CI"), alpha = .2) +
+  scale_linetype_manual(values = c("Observed" = 1, "Expected" = 2), limits = c("Observed", "Expected")) +
+  scale_fill_manual(values = c("95% CI" = "#c2c4d6")) + 
+  scale_x_date(breaks = "1 year", date_labels = "%Y") +
+  theme_minimal() + 
+  theme(legend.position = "bottom",
+        plot.caption = element_text(size = 8, colour = "grey35"),
+        axis.text.x = element_text(angle = 90)) +
+  guides(linetype = guide_legend(ncol = 2),
+         fill = guide_legend(ncol = 1)) +
+  labs(y = "Incidence per 100.000 population", x = "", color = "", linetype = "", fill = "", title = "", caption = "") + facet_wrap(~ variable, scale = "free_y", ncol = 3)
+# dev.off()
+```
+
+
+```{r}
+# Supplementary material
+data_predictions[, paste0(c("Point Forecast", "Lo 95", "Hi 95"), "_cases") := lapply(.SD, function(x){
+  x*population/100000
+}), .SDcols = c("Point Forecast", "Lo 95", "Hi 95")]
+data_predictions_cases_aggr_by_age <- data_predictions[, lapply(.SD, sum), .SDcols = c(paste0(c("Point Forecast", "Lo 95", "Hi 95"), "_cases"), "cases"), .(Year = year(date), variable)]
+data_predictions_cases_aggr_by_age[cases > `Hi 95_cases`, paste0(paste0(c("Point Forecast", "Lo 95", "Hi 95"), "_excess")) := lapply(.SD, function(x){
+  (cases-x)/x*100
+}), .SDcols = paste0(c("Point Forecast", "Lo 95", "Hi 95"), "_cases")]
+data_predictions_cases_aggr_by_age[, tot := paste0(round(`Point Forecast_excess`, 1), " (", round(`Hi 95_excess`, 1), "; ", round(`Lo 95_excess`, 1), ")")]
+data_predictions_cases_aggr_by_age[tot == "NA (NA; NA)", tot := "NE"]
+
+table_s1 <- dcast(data_predictions_cases_aggr_by_age, variable ~ Year, value.var = "tot")
+table_s1
+```
+
+
